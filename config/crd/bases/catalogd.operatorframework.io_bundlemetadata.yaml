@@ -14,7 +14,7 @@ spec:
     singular: bundlemetadata
   scope: Cluster
   versions:
-  - name: v1beta1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: BundleMetadata is the Schema for the bundlemetadata API
@@ -34,10 +34,16 @@ spec:
           spec:
             description: BundleMetadataSpec defines the desired state of BundleMetadata
             properties:
-              catalogSource:
-                description: CatalogSource is the name of the Catalog that provides
-                  this bundle
-                type: string
+              catalog:
+                description: Catalog is the name of the Catalog that provides this
+                  bundle
+                properties:
+                  name:
+                    description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      TODO: Add other useful fields. apiVersion, kind, uid?'
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
               image:
                 description: Image is a reference to the image that provides the bundle
                   contents
@@ -54,7 +60,6 @@ spec:
                     type:
                       type: string
                     value:
-                      type: object
                       x-kubernetes-preserve-unknown-fields: true
                   required:
                   - type
@@ -79,11 +84,9 @@ spec:
                   type: object
                 type: array
             required:
-            - catalogSource
+            - catalog
             - image
             - package
-            - properties
-            - relatedImages
             type: object
           status:
             description: BundleMetadataStatus defines the observed state of BundleMetadata
