@@ -22,7 +22,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	catalogdv1beta1 "github.com/operator-framework/catalogd/pkg/apis/core/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -30,6 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	catalogdv1alpha1 "github.com/operator-framework/catalogd/api/core/v1alpha1"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
@@ -64,7 +65,7 @@ var _ = BeforeSuite(func() {
 	Expect(cfg).NotTo(BeNil())
 
 	sch = runtime.NewScheme()
-	Expect(catalogdv1beta1.AddToScheme(sch)).To(Succeed())
+	Expect(catalogdv1alpha1.AddToScheme(sch)).To(Succeed())
 	Expect(corev1.AddToScheme(sch)).To(Succeed())
 
 	cl, err = client.New(cfg, client.Options{Scheme: sch})
