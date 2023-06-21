@@ -3,7 +3,7 @@
 This repository is a prototype for a custom apiserver that uses a (dedicated ectd instance)[configs/etcd] to serve [FBC](https://olm.operatorframework.io/docs/reference/file-based-catalogs/#docs) content on cluster in a Kubernetes native way on cluster.
 
 
-## Enhacement 
+## Enhancement 
 
 https://hackmd.io/@i2YBW1rSQ8GcKcTIHn9CCA/B1cMe1kHj
 
