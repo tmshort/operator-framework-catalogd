@@ -68,6 +68,6 @@ cp "$TMP_MANIFEST_DIR"/* "$MANIFEST_DIR"/
       new_name="${new_name}".yml
     fi
     # Rename
-    mv "$f" "0000_50_olm_${new_name}"
+    mv "$f" "${new_name}"
   done
 )
