@@ -4,7 +4,7 @@ COPY . .
 RUN make go-build-local
 
 FROM registry.ci.openshift.org/ocp/4.14:base
-
+USER 1001
 COPY --from=builder /build/bin/manager /manager
 
 LABEL io.k8s.display-name="OpenShift Operator Lifecycle Manager Catalog Controller" \
