@@ -53,6 +53,9 @@ $KUSTOMIZE build "${TMP_CONFIG}/default" -o "$TMP_KUSTOMIZE_OUTPUT"
 for container_name in "${!IMAGE_MAPPINGS[@]}"; do
   placeholder="${IMAGE_MAPPINGS[$container_name]}"
   $YQ -i "(select(.kind == \"Deployment\")|.spec.template.spec.containers[]|select(.name==\"$container_name\")|.image) = \"$placeholder\"" "$TMP_KUSTOMIZE_OUTPUT"
+  $YQ -i 'select(.kind == "Deployment").spec.template.metadata.annotations += {"target.workload.openshift.io/management": "{\"effect\": \"PreferredDuringScheduling\"}"}' "$TMP_KUSTOMIZE_OUTPUT"
+  $YQ -i 'select(.kind == "Deployment").spec.template.spec += {"priorityClassName": "system-cluster-critical"}' "$TMP_KUSTOMIZE_OUTPUT"
+  $YQ -i 'select(.kind == "Namespace").metadata.annotations += {"workload.openshift.io/allowed": "management"}' "$TMP_KUSTOMIZE_OUTPUT"
 done
 
 # Use yq to split the single yaml file into 1 per document.
