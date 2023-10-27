@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	catalogd "github.com/operator-framework/catalogd/api/core/v1alpha1"
@@ -43,6 +44,7 @@ var _ = Describe("Catalog Unpacking", func() {
 	var (
 		ctx     context.Context
 		catalog *catalogd.Catalog
+		ns      corev1.Namespace
 		job     batchv1.Job
 	)
 	When("A Catalog is created", func() {
@@ -66,6 +68,13 @@ var _ = Describe("Catalog Unpacking", func() {
 
 			err = c.Create(ctx, catalog)
 			Expect(err).ToNot(HaveOccurred())
+
+			ns = corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "catalogd-e2e-" + rand.String(5),
+				},
+			}
+			Expect(c.Create(ctx, &ns)).NotTo(HaveOccurred())
 		})
 
 		It("Successfully unpacks catalog contents", func() {
@@ -85,7 +94,7 @@ var _ = Describe("Catalog Unpacking", func() {
 			job = batchv1.Job{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-svr-job",
-					Namespace: defaultSystemNamespace,
+					Namespace: ns.Name,
 				},
 				Spec: batchv1.JobSpec{
 					Template: corev1.PodTemplateSpec{
@@ -105,7 +114,7 @@ var _ = Describe("Catalog Unpacking", func() {
 			err = c.Create(ctx, &job)
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() (bool, error) {
-				err = c.Get(ctx, types.NamespacedName{Name: "test-svr-job", Namespace: defaultSystemNamespace}, &job)
+				err = c.Get(ctx, types.NamespacedName{Name: "test-svr-job", Namespace: ns.Name}, &job)
 				if err != nil {
 					return false, err
 				}
@@ -124,7 +133,7 @@ var _ = Describe("Catalog Unpacking", func() {
 			Expect(err).To(Not(HaveOccurred()))
 			// Get logs of the Pod
 			pod := pods.Items[0]
-			logReader, err := kubeClient.CoreV1().Pods(defaultSystemNamespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(context.Background())
+			logReader, err := kubeClient.CoreV1().Pods(ns.Name).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(context.Background())
 			Expect(err).To(Not(HaveOccurred()))
 			actualFBC, err := io.ReadAll(logReader)
 			Expect(err).To(Not(HaveOccurred()))
