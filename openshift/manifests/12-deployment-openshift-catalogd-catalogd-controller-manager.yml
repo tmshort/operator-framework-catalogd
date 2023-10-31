@@ -66,7 +66,9 @@ spec:
             - --health-probe-bind-address=:8081
             - --metrics-bind-address=127.0.0.1:8080
             - --leader-elect
-            - --feature-gates=PackagesBundleMetadataAPIs=true
+            - --catalogs-storage-dir=/var/cache/catalogs
+            - --feature-gates=HTTPServer=true
+            - --http-external-address=http://catalogd-catalogserver.openshift-catalogd.svc
           command:
             - ./manager
           image: ${CATALOGD_IMAGE}
@@ -93,10 +95,16 @@ spec:
             capabilities:
               drop:
                 - ALL
+          volumeMounts:
+            - mountPath: /var/cache/catalogs
+              name: catalog-cache
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: catalogd-controller-manager
       terminationGracePeriodSeconds: 10
+      volumes:
+        - emptyDir: {}
+          name: catalog-cache
       priorityClassName: system-cluster-critical

@@ -20,6 +20,17 @@ IMAGE_MAPPINGS[kube-rbac-proxy]='${KUBE_RBAC_PROXY_IMAGE}'
 # shellcheck disable=SC2016
 IMAGE_MAPPINGS[manager]='${CATALOGD_IMAGE}'
 
+# This is a mapping of catalogd flag names to values. For example, given a deployment with a container
+# named "manager" and arguments:
+# args:
+#  - --flagname=one
+# and an entry to the FLAG_MAPPINGS of FLAG_MAPPINGS[flagname]='two', the argument will be updated to:
+# args:
+#  - --flagname=two
+declare -A FLAG_MAPPINGS
+# shellcheck disable=SC2016
+FLAG_MAPPINGS[http-external-address]='http://catalogd-catalogserver.openshift-catalogd.svc'
+
 ##################################################
 # You shouldn't need to change anything below here
 ##################################################
@@ -56,6 +67,12 @@ for container_name in "${!IMAGE_MAPPINGS[@]}"; do
   $YQ -i 'select(.kind == "Deployment").spec.template.metadata.annotations += {"target.workload.openshift.io/management": "{\"effect\": \"PreferredDuringScheduling\"}"}' "$TMP_KUSTOMIZE_OUTPUT"
   $YQ -i 'select(.kind == "Deployment").spec.template.spec += {"priorityClassName": "system-cluster-critical"}' "$TMP_KUSTOMIZE_OUTPUT"
   $YQ -i 'select(.kind == "Namespace").metadata.annotations += {"workload.openshift.io/allowed": "management"}' "$TMP_KUSTOMIZE_OUTPUT"
+done
+
+# Loop through any flag updates that need to be made to the manager container
+for flag_name in "${!FLAG_MAPPINGS[@]}"; do
+  flagval="${FLAG_MAPPINGS[$flag_name]}"
+  $YQ -i "(select(.kind == \"Deployment\") | .spec.template.spec.containers[] | select(.name == \"manager\") | .args[] | select(. | contains(\"--$flag_name=\")) | .) = \"--$flag_name=$flagval\"" "$TMP_KUSTOMIZE_OUTPUT"
 done
 
 # Use yq to split the single yaml file into 1 per document.

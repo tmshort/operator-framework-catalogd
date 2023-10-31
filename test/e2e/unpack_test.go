@@ -2,17 +2,20 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"io"
 	"os"
 
+	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	catalogd "github.com/operator-framework/catalogd/api/core/v1alpha1"
 )
@@ -41,6 +44,8 @@ var _ = Describe("Catalog Unpacking", func() {
 	var (
 		ctx     context.Context
 		catalog *catalogd.Catalog
+		ns      corev1.Namespace
+		job     batchv1.Job
 	)
 	When("A Catalog is created", func() {
 		BeforeEach(func() {
@@ -63,6 +68,13 @@ var _ = Describe("Catalog Unpacking", func() {
 
 			err = c.Create(ctx, catalog)
 			Expect(err).ToNot(HaveOccurred())
+
+			ns = corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "catalogd-e2e-" + rand.String(5),
+				},
+			}
+			Expect(c.Create(ctx, &ns)).NotTo(HaveOccurred())
 		})
 
 		It("Successfully unpacks catalog contents", func() {
@@ -76,52 +88,60 @@ var _ = Describe("Catalog Unpacking", func() {
 				g.Expect(cond.Reason).To(Equal(catalogd.ReasonUnpackSuccessful))
 			}).Should(Succeed())
 
-			By("Ensuring the expected Package resource is created")
-			pack := &catalogd.Package{}
-			expectedPackSpec := catalogd.PackageSpec{
-				Catalog: corev1.LocalObjectReference{
-					Name: catalogName,
+			By("Making sure the catalog content is available via the http server")
+			err = c.Get(ctx, types.NamespacedName{Name: catalog.Name}, catalog)
+			Expect(err).ToNot(HaveOccurred())
+			job = batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-svr-job",
+					Namespace: ns.Name,
 				},
-				Channels: []catalogd.PackageChannel{
-					{
-						Name: channel,
-						Entries: []catalogd.ChannelEntry{
-							{
-								Name: bundle,
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:    "test-svr",
+									Image:   "curlimages/curl",
+									Command: []string{"sh", "-c", "curl --silent --show-error --location -o - " + catalog.Status.ContentURL},
+								},
 							},
+							RestartPolicy: "Never",
 						},
 					},
 				},
-				DefaultChannel: channel,
-				Name:           pkg,
 			}
-			err := c.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-%s", catalog.Name, pkg)}, pack)
+			err = c.Create(ctx, &job)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(pack.Spec).To(Equal(expectedPackSpec))
+			Eventually(func() (bool, error) {
+				err = c.Get(ctx, types.NamespacedName{Name: "test-svr-job", Namespace: ns.Name}, &job)
+				if err != nil {
+					return false, err
+				}
+				return job.Status.CompletionTime != nil && job.Status.Succeeded == 1, err
+			}).Should(BeTrue())
+			pods := &corev1.PodList{}
+			Eventually(func() (bool, error) {
+				err := c.List(context.Background(), pods, client.MatchingLabels{"job-name": "test-svr-job"})
+				if err != nil {
+					return false, err
+				}
+				return len(pods.Items) == 1, nil
+			}).Should(BeTrue())
 
-			By("Ensuring the expected BundleMetadata resource is created")
-			bm := &catalogd.BundleMetadata{}
-			expectedBMSpec := catalogd.BundleMetadataSpec{
-				Catalog: corev1.LocalObjectReference{
-					Name: catalogName,
-				},
-				Package: pkg,
-				Image:   bundleImage,
-				Properties: []catalogd.Property{
-					{
-						Type:  "olm.package",
-						Value: json.RawMessage(`{"packageName":"prometheus","version":"0.47.0"}`),
-					},
-				},
-			}
-			err = c.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-%s", catalog.Name, bundle)}, bm)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(bm.Spec).To(Equal(expectedBMSpec))
+			expectedFBC, err := os.ReadFile("../../testdata/catalogs/test-catalog/expected_all.json")
+			Expect(err).To(Not(HaveOccurred()))
+			// Get logs of the Pod
+			pod := pods.Items[0]
+			logReader, err := kubeClient.CoreV1().Pods(ns.Name).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(context.Background())
+			Expect(err).To(Not(HaveOccurred()))
+			actualFBC, err := io.ReadAll(logReader)
+			Expect(err).To(Not(HaveOccurred()))
+			Expect(cmp.Diff(expectedFBC, actualFBC)).To(BeEmpty())
 		})
-
 		AfterEach(func() {
-			err := c.Delete(ctx, catalog)
-			Expect(err).ToNot(HaveOccurred())
+			Expect(c.Delete(ctx, &job)).To(Succeed())
+			Expect(c.Delete(ctx, catalog)).To(Succeed())
 			Eventually(func(g Gomega) {
 				err = c.Get(ctx, types.NamespacedName{Name: catalog.Name}, &catalogd.Catalog{})
 				g.Expect(errors.IsNotFound(err)).To(BeTrue())

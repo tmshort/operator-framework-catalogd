@@ -2,11 +2,11 @@
 
 Catalogd is a Kubernetes extension that unpacks [file-based catalog (FBC)](https://olm.operatorframework.io/docs/reference/file-based-catalogs/#docs) content for on-cluster clients. Currently, catalogd unpacks FBC content that is packaged and distributed as container images. The catalogd road map includes plans for unpacking other content sources, such as Git repositories and OCI artifacts. For more information, see the catalogd [issues](https://github.com/operator-framework/catalogd/issues/) page. 
 
-Catalogd helps customers discover installable content by hosting catalog metadata for Kubernetes extensions, such as Operators and controllers. For more information on the Operator Lifecycle Manager (OLM) v1 suite of microservices, see the [documentation](https://github.com/operator-framework/operator-controller/docs/) for the Operator Controller.
+Catalogd helps customers discover installable content by hosting catalog metadata for Kubernetes extensions, such as Operators and controllers. For more information on the Operator Lifecycle Manager (OLM) v1 suite of microservices, see the [documentation](https://github.com/operator-framework/operator-controller/tree/main/docs) for the Operator Controller.
 
 ## Quick start 
 
-**NOTE:** Procedure steps marked with an astericks (`*`) are likely to change with future API updates.
+**NOTE:** Procedure steps marked with an asterisk (`*`) are likely to change with future API updates.
 
 1. To install catalogd, navigate to the [releases](https://github.com/operator-framework/catalogd/releases/) page, and follow the install instructions included in the release you want to install.
 
@@ -91,75 +91,69 @@ Catalogd helps customers discover installable content by hosting catalog metadat
     Events:                    <none>
     ```
 
-1. Run the following command to get a list of packages: `*`
+1. Port forward the `catalogd-catalogserver` service in the `catalogd-system` namespace:
+    ```sh
+    $ kubectl -n catalogd-system port-forward svc/catalogd-catalogserver 8080:80
+    ```
+
+1. Run the following command to get a list of packages:
 
     ```sh
-    $ kubectl get packages
+    $ curl http://localhost:8080/catalogs/operatorhubio/all.json | jq -s '.[] | select(.schema == "olm.package") | .name'
     ```
 
     *Example output*
     ```sh
-    NAME                                                     AGE
-    operatorhubio-ack-acm-controller                         69s
-    operatorhubio-ack-apigatewayv2-controller                69s
-    operatorhubio-ack-applicationautoscaling-controller      69s
-    operatorhubio-ack-cloudtrail-controller                  69s
-    operatorhubio-ack-dynamodb-controller                    69s
-    operatorhubio-ack-ec2-controller                         69s
-    operatorhubio-ack-ecr-controller                         69s
-    operatorhubio-ack-eks-controller                         69s
-    operatorhubio-ack-elasticache-controller                 69s
-    operatorhubio-ack-emrcontainers-controller               69s
-    operatorhubio-ack-eventbridge-controller                 69s
-    operatorhubio-ack-iam-controller                         69s
-    operatorhubio-ack-kinesis-controller                     69s
-    operatorhubio-ack-kms-controller                         69s
-    operatorhubio-ack-lambda-controller                      69s
-    operatorhubio-ack-memorydb-controller                    69s
-    operatorhubio-ack-mq-controller                          69s
+      % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                    Dload  Upload   Total   Spent    Left  Speed
+    100  110M  100  110M    0     0   112M      0 --:--:-- --:--:-- --:--:--  112M
+    "ack-acm-controller"
+    "ack-apigatewayv2-controller"
+    "ack-applicationautoscaling-controller"
+    "ack-cloudtrail-controller"
+    "ack-cloudwatch-controller"
+    "ack-dynamodb-controller"
+    "ack-ec2-controller"
+    "ack-ecr-controller"
+    "ack-eks-controller"
+    "ack-elasticache-controller"
+    "ack-emrcontainers-controller"
+    "ack-eventbridge-controller"
+    "ack-iam-controller"
+    "ack-kinesis-controller"
     ...
     ```
-1. Run the following command to get a list of bundles: `*`
+1. Run the following command to get a list of channels for the `ack-acm-controller` package:
 
     ```sh
-    $ kubectl get bundlemetadata
+    $ curl http://localhost:8080/catalogs/operatorhubio/all.json | jq -s '.[] | select(.schema == "olm.channel") | select(.package == "ack-acm-controller") | .name'
+    ```
+
+    *Example output*
+    ```sh
+      % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                    Dload  Upload   Total   Spent    Left  Speed
+    100  110M  100  110M    0     0   115M      0 --:--:-- --:--:-- --:--:--  116M
+    "alpha"
+    ```
+
+1. Run the following command to get a list of bundles belonging to the `ack-acm-controller` package:
+
+    ```sh
+    $ curl http://localhost:8080/catalogs/operatorhubio/all.json | jq -s '.[] | select(.schema == "olm.bundle") | select(.package == "ack-acm-controller") | .name'
     ```
     
     *Example output*
     ```sh
-    NAME                                                            AGE
-    operatorhubio-ack-acm-controller.v0.0.1                         2m15s
-    operatorhubio-ack-acm-controller.v0.0.2                         2m15s
-    operatorhubio-ack-acm-controller.v0.0.4                         2m15s
-    operatorhubio-ack-acm-controller.v0.0.5                         2m15s
-    operatorhubio-ack-acm-controller.v0.0.6                         2m15s
-    operatorhubio-ack-acm-controller.v0.0.7                         2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.10               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.11               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.12               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.13               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.14               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.15               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.16               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.17               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.18               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.19               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.20               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.21               2m15s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.22               2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.0.9                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.1.0                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.1.1                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.1.2                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.1.3                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.1.4                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.1.5                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v0.1.6                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v1.0.0                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v1.0.2                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v1.0.3                2m14s
-    operatorhubio-ack-apigatewayv2-controller.v1.0.4                2m14s
-    ...
+      % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                    Dload  Upload   Total   Spent    Left  Speed
+    100  110M  100  110M    0     0   122M      0 --:--:-- --:--:-- --:--:--  122M
+    "ack-acm-controller.v0.0.1"
+    "ack-acm-controller.v0.0.2"
+    "ack-acm-controller.v0.0.4"
+    "ack-acm-controller.v0.0.5"
+    "ack-acm-controller.v0.0.6"
+    "ack-acm-controller.v0.0.7"
     ```
 
 ## Contributing

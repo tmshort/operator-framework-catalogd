@@ -50,5 +50,7 @@ spec:
         - "--health-probe-bind-address=:8081"
         - "--metrics-bind-address=127.0.0.1:8080"
         - "--leader-elect"
-        - "--feature-gates=PackagesBundleMetadataAPIs=true"
+        - "--catalogs-storage-dir=/var/cache/catalogs"
+        - "--feature-gates=HTTPServer=true"
+        - "--http-external-address=http://catalogd-catalogserver.catalogd-system.svc"
 

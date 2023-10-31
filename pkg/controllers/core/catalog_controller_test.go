@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net/http"
 	"os"
 	"testing/fstest"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
@@ -22,6 +26,7 @@ import (
 	"github.com/operator-framework/catalogd/internal/source"
 	"github.com/operator-framework/catalogd/pkg/controllers/core"
 	"github.com/operator-framework/catalogd/pkg/features"
+	"github.com/operator-framework/catalogd/pkg/storage"
 )
 
 var _ source.Unpacker = &MockSource{}
@@ -43,16 +48,46 @@ func (ms *MockSource) Unpack(_ context.Context, _ *v1alpha1.Catalog) (*source.Re
 	return ms.result, nil
 }
 
+var _ storage.Instance = &MockStore{}
+
+type MockStore struct {
+	shouldError bool
+}
+
+func (m MockStore) Store(_ string, _ fs.FS) error {
+	if m.shouldError {
+		return errors.New("mockstore store error")
+	}
+	return nil
+}
+
+func (m MockStore) Delete(_ string) error {
+	if m.shouldError {
+		return errors.New("mockstore delete error")
+	}
+	return nil
+}
+
+func (m MockStore) ContentURL(_ string) string {
+	return "URL"
+}
+
+func (m MockStore) StorageServerHandler() http.Handler {
+	panic("not needed")
+}
+
 var _ = Describe("Catalogd Controller Test", func() {
 	format.MaxLength = 0
 	var (
 		ctx        context.Context
 		reconciler *core.CatalogReconciler
 		mockSource *MockSource
+		mockStore  *MockStore
 	)
 	BeforeEach(func() {
 		ctx = context.Background()
 		mockSource = &MockSource{}
+		mockStore = &MockStore{}
 		reconciler = &core.CatalogReconciler{
 			Client: cl,
 			Unpacker: source.NewUnpacker(
@@ -60,9 +95,9 @@ var _ = Describe("Catalogd Controller Test", func() {
 					v1alpha1.SourceTypeImage: mockSource,
 				},
 			),
+			Storage: mockStore,
 		}
 	})
-
 	When("the catalog does not exist", func() {
 		It("returns no error", func() {
 			res, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "non-existent"}})
@@ -148,7 +183,7 @@ var _ = Describe("Catalogd Controller Test", func() {
 
 			AfterEach(func() {
 				By("tearing down cluster state")
-				Expect(cl.Delete(ctx, catalog)).To(Succeed())
+				Expect(client.IgnoreNotFound(cl.Delete(ctx, catalog))).To(Succeed())
 			})
 
 			When("unpacker returns source.Result with state == 'Pending'", func() {
@@ -222,24 +257,19 @@ var _ = Describe("Catalogd Controller Test", func() {
 
 			When("unpacker returns source.Result with state == 'Unpacked'", func() {
 				var (
-					testBundleName              = "webhook-operator.v0.0.1"
+					testBundleName              = "webhook_operator.v0.0.1"
 					testBundleImage             = "quay.io/olmtest/webhook-operator-bundle:0.0.3"
 					testBundleRelatedImageName  = "test"
 					testBundleRelatedImageImage = "testimage:latest"
 					testBundleObjectData        = "dW5pbXBvcnRhbnQK"
-					testPackageDefaultChannel   = "preview"
-					testPackageName             = "webhook-operator"
-					testChannelName             = "preview"
+					testPackageDefaultChannel   = "preview_test"
+					testPackageName             = "webhook_operator_test"
+					testChannelName             = "preview_test"
 					testPackage                 = fmt.Sprintf(testPackageTemplate, testPackageDefaultChannel, testPackageName)
 					testBundle                  = fmt.Sprintf(testBundleTemplate, testBundleImage, testBundleName, testPackageName, testBundleRelatedImageName, testBundleRelatedImageImage, testBundleObjectData)
 					testChannel                 = fmt.Sprintf(testChannelTemplate, testPackageName, testChannelName, testBundleName)
-
-					testBundleMetaName  string
-					testPackageMetaName string
 				)
 				BeforeEach(func() {
-					testBundleMetaName = fmt.Sprintf("%s-%s", catalog.Name, testBundleName)
-					testPackageMetaName = fmt.Sprintf("%s-%s", catalog.Name, testPackageName)
 
 					filesys := &fstest.MapFS{
 						"bundle.yaml":  &fstest.MapFile{Data: []byte(testBundle), Mode: os.ModePerm},
@@ -254,7 +284,6 @@ var _ = Describe("Catalogd Controller Test", func() {
 						FS:             filesys,
 					}
 				})
-
 				It("should set unpacking status to 'unpacked'", func() {
 					// reconcile
 					res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: catalogKey})
@@ -272,236 +301,78 @@ var _ = Describe("Catalogd Controller Test", func() {
 					Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 				})
 
-				When("PackagesBundleMetadataAPIs feature gate is enabled", func() {
+				When("HTTPServer feature gate is enabled", func() {
 					BeforeEach(func() {
 						Expect(features.CatalogdFeatureGate.SetFromMap(map[string]bool{
-							string(features.PackagesBundleMetadataAPIs): true,
-							string(features.CatalogMetadataAPI):         false,
+							string(features.HTTPServer): true,
 						})).NotTo(HaveOccurred())
-
-						// reconcile
+						// call reconciler so that initial finalizer setup is done here
 						res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: catalogKey})
 						Expect(res).To(Equal(ctrl.Result{}))
 						Expect(err).ToNot(HaveOccurred())
 					})
-
-					AfterEach(func() {
-						// clean up package
-						pkg := &v1alpha1.Package{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: testPackageMetaName,
-							},
-						}
-						Expect(cl.Delete(ctx, pkg)).To(Succeed())
-
-						// clean up bundlemetadata
-						bm := &v1alpha1.BundleMetadata{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: testBundleMetaName,
-							},
-						}
-						Expect(cl.Delete(ctx, bm)).To(Succeed())
-						Expect(features.CatalogdFeatureGate.SetFromMap(map[string]bool{
-							string(features.PackagesBundleMetadataAPIs): false,
-							string(features.CatalogMetadataAPI):         false,
-						})).NotTo(HaveOccurred())
-					})
-
-					It("should create BundleMetadata resources", func() {
-						// validate bundlemetadata resources
-						bundlemetadatas := &v1alpha1.BundleMetadataList{}
-						Expect(cl.List(ctx, bundlemetadatas)).To(Succeed())
-						Expect(bundlemetadatas.Items).To(HaveLen(1))
-						bundlemetadata := bundlemetadatas.Items[0]
-						Expect(bundlemetadata.Name).To(Equal(testBundleMetaName))
-						Expect(bundlemetadata.Spec.Image).To(Equal(testBundleImage))
-						Expect(bundlemetadata.Spec.Catalog.Name).To(Equal(catalog.Name))
-						Expect(bundlemetadata.Spec.Package).To(Equal(testPackageName))
-						Expect(bundlemetadata.Spec.RelatedImages).To(HaveLen(1))
-						Expect(bundlemetadata.Spec.RelatedImages[0].Name).To(Equal(testBundleRelatedImageName))
-						Expect(bundlemetadata.Spec.RelatedImages[0].Image).To(Equal(testBundleRelatedImageImage))
-						Expect(bundlemetadata.Spec.Properties).To(HaveLen(1))
-					})
-
-					// TODO (rashmigottipati): Add testing of Package sync process.
-					It("should create Package resources", func() {
-						// validate package resources
-						packages := &v1alpha1.PackageList{}
-						Expect(cl.List(ctx, packages)).To(Succeed())
-						Expect(packages.Items).To(HaveLen(1))
-						pack := packages.Items[0]
-						Expect(pack.Name).To(Equal(testPackageMetaName))
-						Expect(pack.Spec.DefaultChannel).To(Equal(testPackageDefaultChannel))
-						Expect(pack.Spec.Catalog.Name).To(Equal(catalog.Name))
-						Expect(pack.Spec.Channels).To(HaveLen(1))
-						Expect(pack.Spec.Channels[0].Name).To(Equal(testChannelName))
-						Expect(pack.Spec.Channels[0].Entries).To(HaveLen(1))
-						Expect(pack.Spec.Channels[0].Entries[0].Name).To(Equal(testBundleName))
-					})
-
-					When("creating another Catalog", func() {
-						var (
-							tempCatalog             *v1alpha1.Catalog
-							tempTestBundleMetaName  string
-							tempTestPackageMetaName string
-						)
+					When("there is no error in storing the fbc", func() {
 						BeforeEach(func() {
-							tempCatalog = &v1alpha1.Catalog{
-								ObjectMeta: metav1.ObjectMeta{Name: "tempedout"},
-								Spec: v1alpha1.CatalogSpec{
-									Source: v1alpha1.CatalogSource{
-										Type: "image",
-										Image: &v1alpha1.ImageSource{
-											Ref: "somecatalog:latest",
-										},
-									},
-								},
-							}
-
-							tempTestBundleMetaName = fmt.Sprintf("%s-%s", tempCatalog.Name, testBundleName)
-							tempTestPackageMetaName = fmt.Sprintf("%s-%s", tempCatalog.Name, testPackageName)
-
-							Expect(cl.Create(ctx, tempCatalog)).To(Succeed())
-							res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "tempedout"}})
+							By("setting up mockStore to return no error", func() {
+								mockStore.shouldError = false
+							})
+							res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: catalogKey})
 							Expect(res).To(Equal(ctrl.Result{}))
 							Expect(err).ToNot(HaveOccurred())
 						})
-
-						AfterEach(func() {
-							Expect(cl.Delete(ctx, tempCatalog)).NotTo(HaveOccurred())
+						It("should reflect in the status condition", func() {
+							cat := &v1alpha1.Catalog{}
+							Expect(cl.Get(ctx, catalogKey, cat)).To(Succeed())
+							Expect(cat.Status.Phase).To(Equal(v1alpha1.PhaseUnpacked))
+							diff := cmp.Diff(meta.FindStatusCondition(cat.Status.Conditions, v1alpha1.TypeUnpacked), &metav1.Condition{
+								Reason: v1alpha1.ReasonUnpackSuccessful,
+								Status: metav1.ConditionTrue,
+							}, cmpopts.IgnoreFields(metav1.Condition{}, "Type", "ObservedGeneration", "LastTransitionTime", "Message"))
+							Expect(diff).To(Equal(""))
 						})
 
-						It("should not delete BundleMetadata belonging to a different catalog", func() {
-							bundlemetadata := &v1alpha1.BundleMetadata{}
-							Expect(cl.Get(ctx, client.ObjectKey{Name: testBundleMetaName}, bundlemetadata)).To(Succeed())
-							Expect(bundlemetadata.Name).To(Equal(testBundleMetaName))
-							Expect(bundlemetadata.Spec.Image).To(Equal(testBundleImage))
-							Expect(bundlemetadata.Spec.Catalog.Name).To(Equal(catalog.Name))
-							Expect(bundlemetadata.Spec.Package).To(Equal(testPackageName))
-							Expect(bundlemetadata.Spec.RelatedImages).To(HaveLen(1))
-							Expect(bundlemetadata.Spec.RelatedImages[0].Name).To(Equal(testBundleRelatedImageName))
-							Expect(bundlemetadata.Spec.RelatedImages[0].Image).To(Equal(testBundleRelatedImageImage))
-							Expect(bundlemetadata.Spec.Properties).To(HaveLen(1))
-
-							bundlemetadata = &v1alpha1.BundleMetadata{}
-							Expect(cl.Get(ctx, client.ObjectKey{Name: tempTestBundleMetaName}, bundlemetadata)).To(Succeed())
-							Expect(bundlemetadata.Name).To(Equal(tempTestBundleMetaName))
-							Expect(bundlemetadata.Spec.Image).To(Equal(testBundleImage))
-							Expect(bundlemetadata.Spec.Catalog.Name).To(Equal(tempCatalog.Name))
-							Expect(bundlemetadata.Spec.Package).To(Equal(testPackageName))
-							Expect(bundlemetadata.Spec.RelatedImages).To(HaveLen(1))
-							Expect(bundlemetadata.Spec.RelatedImages[0].Name).To(Equal(testBundleRelatedImageName))
-							Expect(bundlemetadata.Spec.RelatedImages[0].Image).To(Equal(testBundleRelatedImageImage))
-							Expect(bundlemetadata.Spec.Properties).To(HaveLen(1))
-						})
-
-						It("should not delete Packages belonging to a different catalog", func() {
-							// validate package resources
-							pack := &v1alpha1.Package{}
-							Expect(cl.Get(ctx, client.ObjectKey{Name: testPackageMetaName}, pack)).To(Succeed())
-							Expect(pack.Name).To(Equal(testPackageMetaName))
-							Expect(pack.Spec.DefaultChannel).To(Equal(testPackageDefaultChannel))
-							Expect(pack.Spec.Catalog.Name).To(Equal(catalog.Name))
-							Expect(pack.Spec.Channels).To(HaveLen(1))
-							Expect(pack.Spec.Channels[0].Name).To(Equal(testChannelName))
-							Expect(pack.Spec.Channels[0].Entries).To(HaveLen(1))
-							Expect(pack.Spec.Channels[0].Entries[0].Name).To(Equal(testBundleName))
-
-							pack = &v1alpha1.Package{}
-							Expect(cl.Get(ctx, client.ObjectKey{Name: tempTestPackageMetaName}, pack)).To(Succeed())
-							Expect(pack.Name).To(Equal(tempTestPackageMetaName))
-							Expect(pack.Spec.DefaultChannel).To(Equal(testPackageDefaultChannel))
-							Expect(pack.Spec.Catalog.Name).To(Equal(tempCatalog.Name))
-							Expect(pack.Spec.Channels).To(HaveLen(1))
-							Expect(pack.Spec.Channels[0].Name).To(Equal(testChannelName))
-							Expect(pack.Spec.Channels[0].Entries).To(HaveLen(1))
-							Expect(pack.Spec.Channels[0].Entries[0].Name).To(Equal(testBundleName))
+						When("the catalog is deleted but there is an error deleting the stored FBC", func() {
+							BeforeEach(func() {
+								By("setting up mockStore to return an error", func() {
+									mockStore.shouldError = true
+								})
+								Expect(cl.Delete(ctx, catalog)).To(Succeed())
+								// call reconciler so that MockStore can send an error on deletion attempt
+								res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: catalogKey})
+								Expect(res).To(Equal(ctrl.Result{}))
+								Expect(err).To(HaveOccurred())
+							})
+							It("should set status condition to reflect the error", func() {
+								// get the catalog and ensure status is set properly
+								cat := &v1alpha1.Catalog{}
+								Expect(cl.Get(ctx, catalogKey, cat)).To(Succeed())
+								cond := meta.FindStatusCondition(cat.Status.Conditions, v1alpha1.TypeDelete)
+								Expect(cond).To(Not(BeNil()))
+								Expect(cond.Reason).To(Equal(v1alpha1.ReasonStorageDeleteFailed))
+								Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+							})
 						})
 					})
-				})
 
-				When("the CatalogMetadataAPI feature gate is enabled", func() {
-					BeforeEach(func() {
-						Expect(features.CatalogdFeatureGate.SetFromMap(map[string]bool{
-							string(features.CatalogMetadataAPI): true,
-						})).NotTo(HaveOccurred())
-
-						// reconcile
-						res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: catalogKey})
-						Expect(res).To(Equal(ctrl.Result{}))
-						Expect(err).ToNot(HaveOccurred())
-					})
-
-					AfterEach(func() {
-						// clean up catalogmetadata
-						Expect(cl.DeleteAllOf(ctx, &v1alpha1.CatalogMetadata{})).To(Succeed())
-						Expect(features.CatalogdFeatureGate.SetFromMap(map[string]bool{
-							string(features.CatalogMetadataAPI): false,
-						})).NotTo(HaveOccurred())
-					})
-
-					// TODO (rashmigottipati): Add testing of CatalogMetadata sync process.
-					It("should create CatalogMetadata resources", func() {
-						catalogMetadatas := &v1alpha1.CatalogMetadataList{}
-						Expect(cl.List(ctx, catalogMetadatas)).To(Succeed())
-						Expect(catalogMetadatas.Items).To(HaveLen(3))
-						for _, catalogMetadata := range catalogMetadatas.Items {
-							Expect(catalogMetadata.Name).To(ContainSubstring(catalogKey.Name))
-							Expect(catalogMetadata.Kind).To(Equal("CatalogMetadata"))
-							Expect(catalogMetadata.OwnerReferences).To(HaveLen(1))
-							Expect(catalogMetadata.OwnerReferences[0].Name).To(Equal(catalogKey.Name))
-							Expect(catalogMetadata.Spec.Catalog.Name).To(Equal(catalogKey.Name))
-						}
-					})
-
-					When("creating another Catalog", func() {
-						var (
-							tempCatalog *v1alpha1.Catalog
-						)
+					When("there is an error storing the fbc", func() {
 						BeforeEach(func() {
-							tempCatalog = &v1alpha1.Catalog{
-								ObjectMeta: metav1.ObjectMeta{Name: "tempedout"},
-								Spec: v1alpha1.CatalogSpec{
-									Source: v1alpha1.CatalogSource{
-										Type: "image",
-										Image: &v1alpha1.ImageSource{
-											Ref: "somecatalog:latest",
-										},
-									},
-								},
-							}
-
-							Expect(cl.Create(ctx, tempCatalog)).To(Succeed())
-							res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "tempedout"}})
+							By("setting up mockStore to return an error", func() {
+								mockStore.shouldError = true
+							})
+							res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: catalogKey})
 							Expect(res).To(Equal(ctrl.Result{}))
-							Expect(err).ToNot(HaveOccurred())
+							Expect(err).To(HaveOccurred())
 						})
-
-						AfterEach(func() {
-							Expect(cl.Delete(ctx, tempCatalog)).NotTo(HaveOccurred())
-						})
-
-						It("should not delete CatalogMetadata belonging to a different catalog", func() {
-							catalogMetadatas := &v1alpha1.CatalogMetadataList{}
-							Expect(cl.List(ctx, catalogMetadatas)).To(Succeed())
-							Expect(catalogMetadatas.Items).To(HaveLen(6))
-							for _, catalogMetadata := range catalogMetadatas.Items {
-								for _, or := range catalogMetadata.GetOwnerReferences() {
-									if or.Kind == "Catalog" {
-										if or.Name == catalogKey.Name {
-											Expect(catalogMetadata.Name).To(ContainSubstring(catalogKey.Name))
-											Expect(catalogMetadata.Kind).To(Equal("CatalogMetadata"))
-											Expect(catalogMetadata.Spec.Catalog.Name).To(Equal(catalogKey.Name))
-											break
-										} else if or.Name == tempCatalog.Name {
-											Expect(catalogMetadata.Name).To(ContainSubstring(tempCatalog.Name))
-											Expect(catalogMetadata.Kind).To(Equal("CatalogMetadata"))
-											Expect(catalogMetadata.Spec.Catalog.Name).To(Equal(tempCatalog.Name))
-											break
-										}
-									}
-								}
-							}
+						It("should set status condition to reflect that storage error", func() {
+							cat := &v1alpha1.Catalog{}
+							Expect(cl.Get(ctx, catalogKey, cat)).To(Succeed())
+							Expect(cat.Status.ResolvedSource).To(BeNil())
+							Expect(cat.Status.Phase).To(Equal(v1alpha1.PhaseFailing))
+							diff := cmp.Diff(meta.FindStatusCondition(cat.Status.Conditions, v1alpha1.TypeUnpacked), &metav1.Condition{
+								Reason: v1alpha1.ReasonStorageFailed,
+								Status: metav1.ConditionFalse,
+							}, cmpopts.IgnoreFields(metav1.Condition{}, "Type", "ObservedGeneration", "LastTransitionTime", "Message"))
+							Expect(diff).To(Equal(""))
 						})
 					})
 				})
@@ -516,8 +387,8 @@ var _ = Describe("Catalogd Controller Test", func() {
 // To learn more about File-Based Catalogs and the different objects, view the
 // documentation at https://olm.operatorframework.io/docs/reference/file-based-catalogs/.
 // The reasoning behind having these as a template is to parameterize different
-// fields to use custom values during testing and verifying to ensure that the BundleMetadata
-// and Package resources created by the Catalog controller have the appropriate values.
+// fields to use custom values during testing and verifying to ensure that the catalog
+// metadata served after the Catalog resource has been reconciled have the appropriate values.
 // Having the parameterized fields allows us to easily change the values that are used in
 // the tests by changing them in one place as opposed to manually changing many string literals
 // throughout the code.
