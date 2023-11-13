@@ -10,6 +10,7 @@ aliases:
    - oceanc80
    - perdasilva
    - stevekuznetsov
+   - tmshort
 
    # Contributors who can review/lgtm any PRs in the repo
    catalogd-reviewers:
