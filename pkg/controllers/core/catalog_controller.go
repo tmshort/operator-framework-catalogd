@@ -18,13 +18,16 @@ package core
 
 import (
 	"context" // #nosec
+	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimacherrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -32,11 +35,16 @@ import (
 
 	"github.com/operator-framework/catalogd/api/core/v1alpha1"
 	"github.com/operator-framework/catalogd/internal/source"
-	"github.com/operator-framework/catalogd/pkg/features"
+	catalogderrors "github.com/operator-framework/catalogd/pkg/errors"
 	"github.com/operator-framework/catalogd/pkg/storage"
 )
 
-const fbcDeletionFinalizer = "catalogd.operatorframework.io/delete-server-cache"
+const (
+	fbcDeletionFinalizer = "catalogd.operatorframework.io/delete-server-cache"
+	// CatalogSources are polled if PollInterval is mentioned, in intervals of wait.Jitter(pollDuration, maxFactor)
+	// wait.Jitter returns a time.Duration between pollDuration and pollDuration + maxFactor * pollDuration.
+	requeueJitterMaxFactor = 0.01
+)
 
 // CatalogReconciler reconciles a Catalog object
 type CatalogReconciler struct {
@@ -50,6 +58,7 @@ type CatalogReconciler struct {
 //+kubebuilder:rbac:groups=catalogd.operatorframework.io,resources=catalogs/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=create;update;patch;delete;get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods/log,verbs=get;list;watch
+//+kubebuilder:rbac:groups=core,namespace=system,resources=secrets,verbs=get;
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -66,6 +75,11 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	reconciledCatsrc := existingCatsrc.DeepCopy()
 	res, reconcileErr := r.reconcile(ctx, reconciledCatsrc)
+
+	var unrecov *catalogderrors.Unrecoverable
+	if errors.As(reconcileErr, &unrecov) {
+		reconcileErr = nil
+	}
 
 	// Update the status subresource before updating the main object. This is
 	// necessary because, in many cases, the main object update will remove the
@@ -104,16 +118,26 @@ func (r *CatalogReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // linting from the linter that was fussing about this.
 // nolint:unparam
 func (r *CatalogReconciler) reconcile(ctx context.Context, catalog *v1alpha1.Catalog) (ctrl.Result, error) {
-	if features.CatalogdFeatureGate.Enabled(features.HTTPServer) && catalog.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(catalog, fbcDeletionFinalizer) {
+	if catalog.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(catalog, fbcDeletionFinalizer) {
 		controllerutil.AddFinalizer(catalog, fbcDeletionFinalizer)
 		return ctrl.Result{}, nil
 	}
-	if features.CatalogdFeatureGate.Enabled(features.HTTPServer) && !catalog.DeletionTimestamp.IsZero() {
+	if !catalog.DeletionTimestamp.IsZero() {
 		if err := r.Storage.Delete(catalog.Name); err != nil {
+			return ctrl.Result{}, updateStatusStorageDeleteError(&catalog.Status, err)
+		}
+		if err := r.Unpacker.Cleanup(ctx, catalog); err != nil {
 			return ctrl.Result{}, updateStatusStorageDeleteError(&catalog.Status, err)
 		}
 		controllerutil.RemoveFinalizer(catalog, fbcDeletionFinalizer)
 		return ctrl.Result{}, nil
+	}
+	// if ResolvedSource is not nil, it indicates that this is not the first time we're
+	// unpacking this catalog.
+	if catalog.Status.ResolvedSource != nil {
+		if !unpackAgain(catalog) {
+			return ctrl.Result{}, nil
+		}
 	}
 	unpackResult, err := r.Unpacker.Unpack(ctx, catalog)
 	if err != nil {
@@ -132,16 +156,23 @@ func (r *CatalogReconciler) reconcile(ctx context.Context, catalog *v1alpha1.Cat
 		// TODO: We should check to see if the unpacked result has the same content
 		//   as the already unpacked content. If it does, we should skip this rest
 		//   of the unpacking steps.
-		if features.CatalogdFeatureGate.Enabled(features.HTTPServer) {
-			err := r.Storage.Store(catalog.Name, unpackResult.FS)
-			if err != nil {
-				return ctrl.Result{}, updateStatusStorageError(&catalog.Status, fmt.Errorf("error storing fbc: %v", err))
+		err := r.Storage.Store(catalog.Name, unpackResult.FS)
+		if err != nil {
+			return ctrl.Result{}, updateStatusStorageError(&catalog.Status, fmt.Errorf("error storing fbc: %v", err))
+		}
+		contentURL = r.Storage.ContentURL(catalog.Name)
+
+		updateStatusUnpacked(&catalog.Status, unpackResult, contentURL, catalog.Generation)
+
+		var requeueAfter time.Duration
+		switch catalog.Spec.Source.Type {
+		case v1alpha1.SourceTypeImage:
+			if catalog.Spec.Source.Image.PollInterval != nil {
+				requeueAfter = wait.Jitter(catalog.Spec.Source.Image.PollInterval.Duration, requeueJitterMaxFactor)
 			}
-			contentURL = r.Storage.ContentURL(catalog.Name)
 		}
 
-		updateStatusUnpacked(&catalog.Status, unpackResult, contentURL)
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	default:
 		return ctrl.Result{}, updateStatusUnpackFailing(&catalog.Status, fmt.Errorf("unknown unpack state %q: %v", unpackResult.State, err))
 	}
@@ -169,10 +200,11 @@ func updateStatusUnpacking(status *v1alpha1.CatalogStatus, result *source.Result
 	})
 }
 
-func updateStatusUnpacked(status *v1alpha1.CatalogStatus, result *source.Result, contentURL string) {
+func updateStatusUnpacked(status *v1alpha1.CatalogStatus, result *source.Result, contentURL string, generation int64) {
 	status.ResolvedSource = result.ResolvedSource
 	status.ContentURL = contentURL
 	status.Phase = v1alpha1.PhaseUnpacked
+	status.ObservedGeneration = generation
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    v1alpha1.TypeUnpacked,
 		Status:  metav1.ConditionTrue,
@@ -213,4 +245,22 @@ func updateStatusStorageDeleteError(status *v1alpha1.CatalogStatus, err error) e
 		Message: fmt.Sprintf("failed to delete storage: %s", err.Error()),
 	})
 	return err
+}
+
+func unpackAgain(catalog *v1alpha1.Catalog) bool {
+	// if the spec.Source.Image.Ref was changed, unpack the new ref
+	if catalog.Spec.Source.Image.Ref != catalog.Status.ResolvedSource.Image.Ref {
+		return true
+	}
+	// if pollInterval is nil, don't unpack again
+	if catalog.Spec.Source.Image.PollInterval == nil {
+		return false
+	}
+	// if it's not time to poll yet, and the CR wasn't changed don't unpack again
+	nextPoll := catalog.Status.ResolvedSource.Image.LastPollAttempt.Add(catalog.Spec.Source.Image.PollInterval.Duration)
+	if nextPoll.After(time.Now()) && catalog.Generation == catalog.Status.ObservedGeneration {
+		return false
+	}
+	// time to unpack
+	return true
 }

@@ -3,19 +3,17 @@ package e2e
 import (
 	"context"
 	"io"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/rand"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	catalogd "github.com/operator-framework/catalogd/api/core/v1alpha1"
 )
@@ -31,21 +29,19 @@ const (
 )
 
 // catalogImageRef returns the image reference for the test catalog image, defaulting to the value of the environment
-// variable TEST_CATALOG_IMAGE if set, falling back to localhost/testdata/catalogs/test-catalog:e2e otherwise.
+// variable TEST_CATALOG_IMAGE if set, falling back to docker-registry.catalogd-e2e.svc:5000/test-catalog:e2e otherwise.
 func catalogImageRef() string {
 	if s := os.Getenv(catalogRefEnvVar); s != "" {
 		return s
 	}
 
-	return "localhost/testdata/catalogs/test-catalog:e2e"
+	return "docker-registry.catalogd-e2e.svc:5000/test-catalog:e2e"
 }
 
 var _ = Describe("Catalog Unpacking", func() {
 	var (
 		ctx     context.Context
 		catalog *catalogd.Catalog
-		ns      corev1.Namespace
-		job     batchv1.Job
 	)
 	When("A Catalog is created", func() {
 		BeforeEach(func() {
@@ -60,7 +56,8 @@ var _ = Describe("Catalog Unpacking", func() {
 					Source: catalogd.CatalogSource{
 						Type: catalogd.SourceTypeImage,
 						Image: &catalogd.ImageSource{
-							Ref: catalogImageRef(),
+							Ref:                   catalogImageRef(),
+							InsecureSkipTLSVerify: true,
 						},
 					},
 				},
@@ -68,13 +65,6 @@ var _ = Describe("Catalog Unpacking", func() {
 
 			err = c.Create(ctx, catalog)
 			Expect(err).ToNot(HaveOccurred())
-
-			ns = corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "catalogd-e2e-" + rand.String(5),
-				},
-			}
-			Expect(c.Create(ctx, &ns)).NotTo(HaveOccurred())
 		})
 
 		It("Successfully unpacks catalog contents", func() {
@@ -90,57 +80,34 @@ var _ = Describe("Catalog Unpacking", func() {
 
 			By("Making sure the catalog content is available via the http server")
 			err = c.Get(ctx, types.NamespacedName{Name: catalog.Name}, catalog)
-			Expect(err).ToNot(HaveOccurred())
-			job = batchv1.Job{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-svr-job",
-					Namespace: ns.Name,
-				},
-				Spec: batchv1.JobSpec{
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:    "test-svr",
-									Image:   "curlimages/curl",
-									Command: []string{"sh", "-c", "curl --silent --show-error --location -o - " + catalog.Status.ContentURL},
-								},
-							},
-							RestartPolicy: "Never",
-						},
-					},
-				},
+			url, err := url.Parse(catalog.Status.ContentURL)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(url).NotTo(BeNil())
+			// url is expected to be in the format of
+			// http://{service_name}.{namespace}.svc/{catalog_name}/all.json
+			// so to get the namespace and name of the service we grab only
+			// the hostname and split it on the '.' character
+			ns := strings.Split(url.Hostname(), ".")[1]
+			name := strings.Split(url.Hostname(), ".")[0]
+			port := url.Port()
+			// the ProxyGet() call below needs an explicit port value, so if
+			// value from url.Port() is empty, we assume port 80.
+			if port == "" {
+				port = "80"
 			}
-			err = c.Create(ctx, &job)
-			Expect(err).ToNot(HaveOccurred())
-			Eventually(func() (bool, error) {
-				err = c.Get(ctx, types.NamespacedName{Name: "test-svr-job", Namespace: ns.Name}, &job)
-				if err != nil {
-					return false, err
-				}
-				return job.Status.CompletionTime != nil && job.Status.Succeeded == 1, err
-			}).Should(BeTrue())
-			pods := &corev1.PodList{}
-			Eventually(func() (bool, error) {
-				err := c.List(context.Background(), pods, client.MatchingLabels{"job-name": "test-svr-job"})
-				if err != nil {
-					return false, err
-				}
-				return len(pods.Items) == 1, nil
-			}).Should(BeTrue())
+			resp := kubeClient.CoreV1().Services(ns).ProxyGet(url.Scheme, name, port, url.Path, map[string]string{})
+			rc, err := resp.Stream(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			defer rc.Close()
 
 			expectedFBC, err := os.ReadFile("../../testdata/catalogs/test-catalog/expected_all.json")
 			Expect(err).To(Not(HaveOccurred()))
-			// Get logs of the Pod
-			pod := pods.Items[0]
-			logReader, err := kubeClient.CoreV1().Pods(ns.Name).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(context.Background())
-			Expect(err).To(Not(HaveOccurred()))
-			actualFBC, err := io.ReadAll(logReader)
+
+			actualFBC, err := io.ReadAll(rc)
 			Expect(err).To(Not(HaveOccurred()))
 			Expect(cmp.Diff(expectedFBC, actualFBC)).To(BeEmpty())
 		})
 		AfterEach(func() {
-			Expect(c.Delete(ctx, &job)).To(Succeed())
 			Expect(c.Delete(ctx, catalog)).To(Succeed())
 			Eventually(func(g Gomega) {
 				err = c.Get(ctx, types.NamespacedName{Name: catalog.Name}, &catalogd.Catalog{})
