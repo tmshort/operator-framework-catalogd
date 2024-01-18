@@ -1,0 +1,4 @@
+expectedMergeBase: cd2943bbbafd8ba4c921ace34de3628a7bed8d11
+upstreamBranch: main
+upstreamOrg: operator-framework
+upstreamRepo: catalogd
