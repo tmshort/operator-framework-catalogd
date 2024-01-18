@@ -16,16 +16,18 @@ import (
 )
 
 const (
-	SchemaPackage = "olm.package"
-	SchemaChannel = "olm.channel"
-	SchemaBundle  = "olm.bundle"
+	SchemaPackage     = "olm.package"
+	SchemaChannel     = "olm.channel"
+	SchemaBundle      = "olm.bundle"
+	SchemaDeprecation = "olm.deprecations"
 )
 
 type DeclarativeConfig struct {
-	Packages []Package
-	Channels []Channel
-	Bundles  []Bundle
-	Others   []Meta
+	Packages     []Package
+	Channels     []Channel
+	Bundles      []Bundle
+	Deprecations []Deprecation
+	Others       []Meta
 }
 
 type Package struct {
@@ -88,6 +90,22 @@ type Bundle struct {
 type RelatedImage struct {
 	Name  string `json:"name"`
 	Image string `json:"image"`
+}
+
+type Deprecation struct {
+	Schema  string             `json:"schema"`
+	Package string             `json:"package"`
+	Entries []DeprecationEntry `json:"entries"`
+}
+
+type DeprecationEntry struct {
+	Reference PackageScopedReference `json:"reference"`
+	Message   string                 `json:"message"`
+}
+
+type PackageScopedReference struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name,omitempty"`
 }
 
 type Meta struct {
@@ -180,4 +198,12 @@ func extractUniqueMetaKeys(blobMap map[string]any, m *Meta) error {
 		*ptr = v
 	}
 	return nil
+}
+
+func (destination *DeclarativeConfig) Merge(src *DeclarativeConfig) {
+	destination.Packages = append(destination.Packages, src.Packages...)
+	destination.Channels = append(destination.Channels, src.Channels...)
+	destination.Bundles = append(destination.Bundles, src.Bundles...)
+	destination.Others = append(destination.Others, src.Others...)
+	destination.Deprecations = append(destination.Deprecations, src.Deprecations...)
 }
