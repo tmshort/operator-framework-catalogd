@@ -1,12 +1,15 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+
+	"github.com/NYTimes/gziphandler"
 
 	"github.com/operator-framework/operator-registry/alpha/declcfg"
 )
@@ -21,7 +24,7 @@ type LocalDir struct {
 	BaseURL *url.URL
 }
 
-func (s LocalDir) Store(catalog string, fsys fs.FS) error {
+func (s LocalDir) Store(ctx context.Context, catalog string, fsys fs.FS) error {
 	fbcDir := filepath.Join(s.RootDir, catalog)
 	if err := os.MkdirAll(fbcDir, 0700); err != nil {
 		return err
@@ -31,7 +34,7 @@ func (s LocalDir) Store(catalog string, fsys fs.FS) error {
 		return err
 	}
 	defer os.Remove(tempFile.Name())
-	err = declcfg.WalkMetasFS(fsys, func(path string, meta *declcfg.Meta, err error) error {
+	err = declcfg.WalkMetasFS(ctx, fsys, func(path string, meta *declcfg.Meta, err error) error {
 		if err != nil {
 			return fmt.Errorf("error in parsing catalog content files in the filesystem: %w", err)
 		}
@@ -55,8 +58,20 @@ func (s LocalDir) ContentURL(catalog string) string {
 
 func (s LocalDir) StorageServerHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(s.BaseURL.Path, http.StripPrefix(s.BaseURL.Path, http.FileServer(http.FS(&filesOnlyFilesystem{os.DirFS(s.RootDir)}))))
+	mux.Handle(s.BaseURL.Path, gziphandler.GzipHandler(http.StripPrefix(s.BaseURL.Path, http.FileServer(http.FS(&filesOnlyFilesystem{os.DirFS(s.RootDir)})))))
 	return mux
+}
+
+func (s LocalDir) ContentExists(catalog string) bool {
+	file, err := os.Stat(filepath.Join(s.RootDir, catalog, "all.json"))
+	if err != nil {
+		return false
+	}
+	if !file.Mode().IsRegular() {
+		// path is not valid content
+		return false
+	}
+	return true
 }
 
 // filesOnlyFilesystem is a file system that can open only regular
