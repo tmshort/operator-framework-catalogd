@@ -79,7 +79,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test-unit
 test-unit: generate fmt vet $(SETUP_ENVTEST) ## Run tests.
-	eval $$($(SETUP_ENVTEST) use -p env $(ENVTEST_SERVER_VERSION) $(SETUP_ENVTEST_BIN_DIR_OVERRIDE)) && go test $(shell go list ./... | grep -v /test/e2e) -coverprofile cover.out
+	eval $$($(SETUP_ENVTEST) use -p env $(ENVTEST_SERVER_VERSION) $(SETUP_ENVTEST_BIN_DIR_OVERRIDE)) && go test $(shell go list ./... | grep -v /test/e2e | grep -v /test/upgrade) -coverprofile cover.out
 
 FOCUS := $(if $(TEST),-v -focus "$(TEST)")
 ifeq ($(origin E2E_FLAGS), undefined)
@@ -106,12 +106,34 @@ verify: tidy fmt vet generate ## Verify the current code generation and lint
 lint: $(GOLANGCI_LINT) ## Run golangci linter.
 	$(GOLANGCI_LINT) run $(GOLANGCI_LINT_ARGS)
 
+.PHONY: test-upgrade-e2e
+test-upgrade-e2e: export TEST_CLUSTER_CATALOG_NAME := test-catalog
+test-upgrade-e2e: export TEST_CLUSTER_CATALOG_IMAGE := docker-registry.catalogd-e2e.svc:5000/test-catalog:e2e
+test-upgrade-e2e: kind-cluster cert-manager build-container kind-load image-registry run-latest-release pre-upgrade-setup deploy wait post-upgrade-checks kind-cluster-cleanup ## Run upgrade e2e tests on a local kind cluster
+
+pre-upgrade-setup:
+	./test/tools/imageregistry/pre-upgrade-setup.sh ${TEST_CLUSTER_CATALOG_IMAGE} ${TEST_CLUSTER_CATALOG_NAME}
+
+.PHONY: run-latest-release
+run-latest-release:
+	kubectl apply -f https://github.com/operator-framework/catalogd/releases/latest/download/catalogd.yaml
+	kubectl wait --for=condition=Available --namespace=$(CATALOGD_NAMESPACE) deployment/catalogd-controller-manager --timeout=60s
+
+.PHONY: post-upgrade-checks
+post-upgrade-checks: $(GINKGO)
+	$(GINKGO) $(E2E_FLAGS) -trace -vv $(FOCUS) test/upgrade
+
 ##@ Build
 
 BINARIES=manager
 LINUX_BINARIES=$(join $(addprefix linux/,$(BINARIES)), )
 
 # Build info
+ifeq ($(origin VERSION), undefined)
+VERSION := $(shell git describe --tags --always --dirty)
+endif
+export VERSION
+
 export VERSION_PKG     := $(shell go list -m)/internal/version
 
 export GIT_COMMIT      := $(shell git rev-parse HEAD)
@@ -175,9 +197,12 @@ kind-load: $(KIND) ## Load the built images onto the local cluster
 install: build-container kind-load cert-manager deploy wait ## Install local catalogd
 
 .PHONY: deploy
+deploy: export MANIFEST="./catalogd.yaml"
+deploy: export DEFAULT_CATALOGS="./config/base/default/clustercatalogs/default-catalogs.yaml"
 deploy: $(KUSTOMIZE) ## Deploy Catalogd to the K8s cluster specified in ~/.kube/config.
-	cd config/base/manager && $(KUSTOMIZE) edit set image controller=$(IMAGE)
-	$(KUSTOMIZE) build config/overlays/cert-manager | kubectl apply -f -
+	cd config/base/manager && $(KUSTOMIZE) edit set image controller=$(IMAGE) && cd ../../..
+	$(KUSTOMIZE) build config/overlays/cert-manager > catalogd.yaml
+	envsubst '$$CERT_MGR_VERSION,$$MANIFEST,$$DEFAULT_CATALOGS' < scripts/install.tpl.sh | bash -s
 
 .PHONY: undeploy
 undeploy: $(KUSTOMIZE) ## Undeploy Catalogd from the K8s cluster specified in ~/.kube/config.
@@ -185,6 +210,8 @@ undeploy: $(KUSTOMIZE) ## Undeploy Catalogd from the K8s cluster specified in ~/
 
 wait:
 	kubectl wait --for=condition=Available --namespace=$(CATALOGD_NAMESPACE) deployment/catalogd-controller-manager --timeout=60s
+	kubectl wait --for=condition=Ready --namespace=$(CATALOGD_NAMESPACE) certificate/catalogd-catalogserver-cert # Avoid upgrade test flakes when reissuing cert
+
 
 .PHONY: cert-manager
 cert-manager:
@@ -205,8 +232,11 @@ endif
 release: $(GORELEASER) ## Runs goreleaser for catalogd. By default, this will run only as a snapshot and will not publish any artifacts unless it is run with different arguments. To override the arguments, run with "GORELEASER_ARGS=...". When run as a github action from a tag, this target will publish a full release.
 	$(GORELEASER) $(GORELEASER_ARGS)
 
+quickstart: export MANIFEST := https://github.com/operator-framework/catalogd/releases/download/$(VERSION)/catalogd.yaml
+quickstart: export DEFAULT_CATALOGS := https://github.com/operator-framework/catalogd/releases/download/$(VERSION)/default-catalogs.yaml
 quickstart: $(KUSTOMIZE) generate ## Generate the installation release manifests and scripts
 	$(KUSTOMIZE) build config/overlays/cert-manager | sed "s/:devel/:$(GIT_VERSION)/g" > catalogd.yaml
+	envsubst '$$CERT_MGR_VERSION,$$MANIFEST,$$DEFAULT_CATALOGS' < scripts/install.tpl.sh > install.sh
 
 .PHONY: demo-update
 demo-update:

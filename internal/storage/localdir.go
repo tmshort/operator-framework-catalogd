@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/NYTimes/gziphandler"
+	"github.com/klauspost/compress/gzhttp"
 
 	"github.com/operator-framework/operator-registry/alpha/declcfg"
 )
@@ -58,7 +58,15 @@ func (s LocalDir) ContentURL(catalog string) string {
 
 func (s LocalDir) StorageServerHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(s.BaseURL.Path, gziphandler.GzipHandler(http.StripPrefix(s.BaseURL.Path, http.FileServer(http.FS(&filesOnlyFilesystem{os.DirFS(s.RootDir)})))))
+	fsHandler := http.FileServer(http.FS(&filesOnlyFilesystem{os.DirFS(s.RootDir)}))
+	spHandler := http.StripPrefix(s.BaseURL.Path, fsHandler)
+	gzHandler := gzhttp.GzipHandler(spHandler)
+
+	typeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "application/jsonl")
+		gzHandler.ServeHTTP(w, r)
+	})
+	mux.Handle(s.BaseURL.Path, typeHandler)
 	return mux
 }
 
