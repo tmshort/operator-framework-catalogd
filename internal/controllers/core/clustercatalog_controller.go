@@ -40,7 +40,7 @@ import (
 )
 
 const (
-	fbcDeletionFinalizer = "catalogd.operatorframework.io/delete-server-cache"
+	fbcDeletionFinalizer = "olm.operatorframework.io/delete-server-cache"
 	// CatalogSources are polled if PollInterval is mentioned, in intervals of wait.Jitter(pollDuration, maxFactor)
 	// wait.Jitter returns a time.Duration between pollDuration and pollDuration + maxFactor * pollDuration.
 	requeueJitterMaxFactor = 0.01
@@ -53,9 +53,9 @@ type ClusterCatalogReconciler struct {
 	Storage  storage.Instance
 }
 
-//+kubebuilder:rbac:groups=catalogd.operatorframework.io,resources=clustercatalogs,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=catalogd.operatorframework.io,resources=clustercatalogs/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=catalogd.operatorframework.io,resources=clustercatalogs/finalizers,verbs=update
+//+kubebuilder:rbac:groups=olm.operatorframework.io,resources=clustercatalogs,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=olm.operatorframework.io,resources=clustercatalogs/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=olm.operatorframework.io,resources=clustercatalogs/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=create;update;patch;delete;get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods/log,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,namespace=system,resources=secrets,verbs=get;
@@ -160,12 +160,20 @@ func (r *ClusterCatalogReconciler) reconcile(ctx context.Context, catalog *v1alp
 		}
 		contentURL = r.Storage.ContentURL(catalog.Name)
 
-		updateStatusUnpacked(&catalog.Status, unpackResult, contentURL, catalog.Generation)
+		var lastUnpacked metav1.Time
+
+		if unpackResult != nil && unpackResult.ResolvedSource != nil && unpackResult.ResolvedSource.Image != nil {
+			lastUnpacked = unpackResult.ResolvedSource.Image.LastUnpacked
+		} else {
+			lastUnpacked = metav1.Time{}
+		}
+
+		updateStatusUnpacked(&catalog.Status, unpackResult, contentURL, catalog.Generation, lastUnpacked)
 
 		var requeueAfter time.Duration
 		switch catalog.Spec.Source.Type {
 		case v1alpha1.SourceTypeImage:
-			if catalog.Spec.Source.Image.PollInterval != nil {
+			if catalog.Spec.Source.Image != nil && catalog.Spec.Source.Image.PollInterval != nil {
 				requeueAfter = wait.Jitter(catalog.Spec.Source.Image.PollInterval.Duration, requeueJitterMaxFactor)
 			}
 		}
@@ -178,7 +186,6 @@ func (r *ClusterCatalogReconciler) reconcile(ctx context.Context, catalog *v1alp
 
 func updateStatusUnpackPending(status *v1alpha1.ClusterCatalogStatus, result *source.Result) {
 	status.ResolvedSource = nil
-	status.Phase = v1alpha1.PhasePending
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    v1alpha1.TypeUnpacked,
 		Status:  metav1.ConditionFalse,
@@ -189,7 +196,6 @@ func updateStatusUnpackPending(status *v1alpha1.ClusterCatalogStatus, result *so
 
 func updateStatusUnpacking(status *v1alpha1.ClusterCatalogStatus, result *source.Result) {
 	status.ResolvedSource = nil
-	status.Phase = v1alpha1.PhaseUnpacking
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    v1alpha1.TypeUnpacked,
 		Status:  metav1.ConditionFalse,
@@ -198,11 +204,11 @@ func updateStatusUnpacking(status *v1alpha1.ClusterCatalogStatus, result *source
 	})
 }
 
-func updateStatusUnpacked(status *v1alpha1.ClusterCatalogStatus, result *source.Result, contentURL string, generation int64) {
+func updateStatusUnpacked(status *v1alpha1.ClusterCatalogStatus, result *source.Result, contentURL string, generation int64, lastUnpacked metav1.Time) {
 	status.ResolvedSource = result.ResolvedSource
 	status.ContentURL = contentURL
-	status.Phase = v1alpha1.PhaseUnpacked
 	status.ObservedGeneration = generation
+	status.LastUnpacked = lastUnpacked
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    v1alpha1.TypeUnpacked,
 		Status:  metav1.ConditionTrue,
@@ -213,7 +219,6 @@ func updateStatusUnpacked(status *v1alpha1.ClusterCatalogStatus, result *source.
 
 func updateStatusUnpackFailing(status *v1alpha1.ClusterCatalogStatus, err error) error {
 	status.ResolvedSource = nil
-	status.Phase = v1alpha1.PhaseFailing
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    v1alpha1.TypeUnpacked,
 		Status:  metav1.ConditionFalse,
@@ -225,7 +230,6 @@ func updateStatusUnpackFailing(status *v1alpha1.ClusterCatalogStatus, err error)
 
 func updateStatusStorageError(status *v1alpha1.ClusterCatalogStatus, err error) error {
 	status.ResolvedSource = nil
-	status.Phase = v1alpha1.PhaseFailing
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:    v1alpha1.TypeUnpacked,
 		Status:  metav1.ConditionFalse,
@@ -253,6 +257,10 @@ func (r *ClusterCatalogReconciler) needsUnpacking(catalog *v1alpha1.ClusterCatal
 	}
 	if !r.Storage.ContentExists(catalog.Name) {
 		return true
+	}
+	// if there is no spec.Source.Image, don't unpack again
+	if catalog.Spec.Source.Image == nil {
+		return false
 	}
 	// if the spec.Source.Image.Ref was changed, unpack the new ref
 	if catalog.Spec.Source.Image.Ref != catalog.Status.ResolvedSource.Image.Ref {

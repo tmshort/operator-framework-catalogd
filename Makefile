@@ -27,7 +27,7 @@ endif
 include .bingo/Variables.mk
 
 # Dependencies
-export CERT_MGR_VERSION := v1.11.0
+export CERT_MGR_VERSION := v1.15.3
 ENVTEST_SERVER_VERSION := $(shell go list -m k8s.io/client-go | cut -d" " -f2 | sed 's/^v0\.\([[:digit:]]\{1,\}\)\.[[:digit:]]\{1,\}$$/1.\1.x/')
 
 # Cluster configuration
@@ -67,7 +67,7 @@ clean: ## Remove binaries and test artifacts
 .PHONY: generate
 generate: $(CONTROLLER_GEN) ## Generate code and manifests.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/base/crd/bases output:rbac:artifacts:config=config/base/rbac
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/base/crd/bases output:rbac:artifacts:config=config/base/rbac output:webhook:artifacts:config=config/base/manager/webhook/
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -76,6 +76,13 @@ fmt: ## Run go fmt against code.
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet ./...
+
+.PHONY: bingo-upgrade
+bingo-upgrade: $(BINGO) #EXHELP Upgrade tools
+	@for pkg in $$($(BINGO) list | awk '{ print $$1 }' | tail -n +3); do \
+		echo "Upgrading $$pkg to latest..."; \
+		$(BINGO) get "$$pkg@latest"; \
+	done
 
 .PHONY: test-unit
 test-unit: generate fmt vet $(SETUP_ENVTEST) ## Run tests.
@@ -109,15 +116,14 @@ lint: $(GOLANGCI_LINT) ## Run golangci linter.
 .PHONY: test-upgrade-e2e
 test-upgrade-e2e: export TEST_CLUSTER_CATALOG_NAME := test-catalog
 test-upgrade-e2e: export TEST_CLUSTER_CATALOG_IMAGE := docker-registry.catalogd-e2e.svc:5000/test-catalog:e2e
-test-upgrade-e2e: kind-cluster cert-manager build-container kind-load image-registry run-latest-release pre-upgrade-setup deploy wait post-upgrade-checks kind-cluster-cleanup ## Run upgrade e2e tests on a local kind cluster
+test-upgrade-e2e: kind-cluster cert-manager build-container kind-load image-registry run-latest-release pre-upgrade-setup only-deploy-manifest wait post-upgrade-checks kind-cluster-cleanup ## Run upgrade e2e tests on a local kind cluster
 
 pre-upgrade-setup:
 	./test/tools/imageregistry/pre-upgrade-setup.sh ${TEST_CLUSTER_CATALOG_IMAGE} ${TEST_CLUSTER_CATALOG_NAME}
 
 .PHONY: run-latest-release
 run-latest-release:
-	kubectl apply -f https://github.com/operator-framework/catalogd/releases/latest/download/catalogd.yaml
-	kubectl wait --for=condition=Available --namespace=$(CATALOGD_NAMESPACE) deployment/catalogd-controller-manager --timeout=60s
+	curl -L -s https://github.com/operator-framework/catalogd/releases/latest/download/install.sh | bash -s
 
 .PHONY: post-upgrade-checks
 post-upgrade-checks: $(GINKGO)
@@ -194,19 +200,20 @@ kind-load: $(KIND) ## Load the built images onto the local cluster
 	$(KIND) load docker-image $(IMAGE) --name $(KIND_CLUSTER_NAME)
 
 .PHONY: install
-install: build-container kind-load cert-manager deploy wait ## Install local catalogd
+install: build-container kind-load deploy wait ## Install local catalogd
 
 .PHONY: deploy
 deploy: export MANIFEST="./catalogd.yaml"
 deploy: export DEFAULT_CATALOGS="./config/base/default/clustercatalogs/default-catalogs.yaml"
-deploy: $(KUSTOMIZE) ## Deploy Catalogd to the K8s cluster specified in ~/.kube/config.
+deploy: $(KUSTOMIZE) ## Deploy Catalogd to the K8s cluster specified in ~/.kube/config with cert-manager and default clustercatalogs
 	cd config/base/manager && $(KUSTOMIZE) edit set image controller=$(IMAGE) && cd ../../..
-	$(KUSTOMIZE) build config/overlays/cert-manager > catalogd.yaml
+	$(KUSTOMIZE) build config/overlays/cert-manager | sed "s/cert-git-version/cert-$(GIT_VERSION)/g" > catalogd.yaml
 	envsubst '$$CERT_MGR_VERSION,$$MANIFEST,$$DEFAULT_CATALOGS' < scripts/install.tpl.sh | bash -s
 
-.PHONY: undeploy
-undeploy: $(KUSTOMIZE) ## Undeploy Catalogd from the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/overlays/cert-manager | kubectl delete --ignore-not-found=true -f -
+.PHONY: only-deploy-manifest
+only-deploy-manifest: $(KUSTOMIZE) ## Deploy just the Catalogd manifest--used in e2e testing where cert-manager is installed in a separate step
+	cd config/base/manager && $(KUSTOMIZE) edit set image controller=$(IMAGE)
+	$(KUSTOMIZE) build config/overlays/cert-manager | kubectl apply -f -
 
 wait:
 	kubectl wait --for=condition=Available --namespace=$(CATALOGD_NAMESPACE) deployment/catalogd-controller-manager --timeout=60s
@@ -235,7 +242,7 @@ release: $(GORELEASER) ## Runs goreleaser for catalogd. By default, this will ru
 quickstart: export MANIFEST := https://github.com/operator-framework/catalogd/releases/download/$(VERSION)/catalogd.yaml
 quickstart: export DEFAULT_CATALOGS := https://github.com/operator-framework/catalogd/releases/download/$(VERSION)/default-catalogs.yaml
 quickstart: $(KUSTOMIZE) generate ## Generate the installation release manifests and scripts
-	$(KUSTOMIZE) build config/overlays/cert-manager | sed "s/:devel/:$(GIT_VERSION)/g" > catalogd.yaml
+	$(KUSTOMIZE) build config/overlays/cert-manager | sed "s/:devel/:$(GIT_VERSION)/g" | sed "s/cert-git-version/cert-$(GIT_VERSION)/g" > catalogd.yaml
 	envsubst '$$CERT_MGR_VERSION,$$MANIFEST,$$DEFAULT_CATALOGS' < scripts/install.tpl.sh > install.sh
 
 .PHONY: demo-update

@@ -5,32 +5,6 @@ metadata:
   name: catalogd-manager-role
 rules:
   - apiGroups:
-      - catalogd.operatorframework.io
-    resources:
-      - clustercatalogs
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - catalogd.operatorframework.io
-    resources:
-      - clustercatalogs/finalizers
-    verbs:
-      - update
-  - apiGroups:
-      - catalogd.operatorframework.io
-    resources:
-      - clustercatalogs/status
-    verbs:
-      - get
-      - patch
-      - update
-  - apiGroups:
       - ""
     resources:
       - pods
@@ -50,3 +24,29 @@ rules:
       - get
       - list
       - watch
+  - apiGroups:
+      - olm.operatorframework.io
+    resources:
+      - clustercatalogs
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - olm.operatorframework.io
+    resources:
+      - clustercatalogs/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - olm.operatorframework.io
+    resources:
+      - clustercatalogs/status
+    verbs:
+      - get
+      - patch
+      - update

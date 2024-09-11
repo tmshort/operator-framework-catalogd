@@ -1,7 +1,10 @@
 # `ClusterCatalog` Interface
-`catalogd` serves catalog content via an HTTP(S) endpoint as a [JSON Lines](https://jsonlines.org/) stream of File-Based Catalog (FBC) [Meta](https://olm.operatorframework.io/docs/reference/file-based-catalogs/#schema) objects delimited by newlines.
+`catalogd` serves catalog content via an HTTP(S) endpoint
 
-## Example
+## Response Format
+`catalogd` responses are encoded as a [JSON Lines](https://jsonlines.org/) stream of File-Based Catalog (FBC) [Meta](https://olm.operatorframework.io/docs/reference/file-based-catalogs/#schema) objects delimited by newlines.
+
+### Example
 For an example JSON-encoded FBC snippet
 ```json
 {
@@ -43,6 +46,27 @@ the corresponding JSON Lines formatted response would be
 {"schema":"olm.bundle","name":"cockroachdb.v6.0.0","package":"cockroachdb","image":"quay.io/openshift-community-operators/cockroachdb@sha256:d3016b1507515fc7712f9c47fd9082baf9ccb070aaab58ed0ef6e5abdedde8ba","properties":[{"type":"olm.package","value":{"packageName":"cockroachdb","version":"6.0.0"}}]}
 ```
 
+## Compression Support
+
+`catalogd` supports gzip compression of responses, which can significantly reduce associated network traffic.  In order to signal to `catalogd` that the client handles compressed responses, the client must include `Accept-Encoding: gzip` as a header in the HTTP request.
+
+`catalogd` will include a `Content-Encoding: gzip` header in compressed responses.  
+
+Note that `catalogd` will only compress catalogs larger than 1400 bytes.
+
+### Example
+
+The demo below
+1. retrieves plaintext catalog content (and saves to file 1)
+2. adds the `Accept-Encoding` header and retrieves compressed content
+3. adds the `Accept-Encofing` header and uses curl to decompress the response (and saves to file 2)
+4. uses diff to demonstrate that there is no difference between the contents of files 1 and 2
+
+
+[![asciicast](https://asciinema.org/a/668823.svg)](https://asciinema.org/a/668823)
+
+
+
 # Fetching `ClusterCatalog` contents from the Catalogd HTTP Server
 This section covers how to fetch the contents for a `ClusterCatalog` from the
 Catalogd HTTP(S) Server.
@@ -67,7 +91,6 @@ of a catalog can be read from:
       status: "True"
       type: Unpacked
     contentURL: https://catalogd-catalogserver.olmv1-system.svc/catalogs/operatorhubio/all.json
-    phase: Unpacked
     resolvedSource:
       image:
         ref: quay.io/operatorhubio/catalog@sha256:e53267559addc85227c2a7901ca54b980bc900276fc24d3f4db0549cb38ecf76
@@ -123,7 +146,7 @@ This section outlines a way of exposing the `Catalogd` Service's endpoints outsi
 
     ```sh
       $ kubectl apply -f - << EOF
-      apiVersion: catalogd.operatorframework.io/v1alpha1
+      apiVersion: olm.operatorframework.io/v1alpha1
       kind: ClusterCatalog
         metadata:
           name: operatorhubio
