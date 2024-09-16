@@ -1,0 +1,5 @@
+kind: MutatingWebhookConfiguratiuon
+metadata:
+  name: mutating-webhook-configuration
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"

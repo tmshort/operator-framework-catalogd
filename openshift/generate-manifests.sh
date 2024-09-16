@@ -48,10 +48,13 @@ trap 'rm -rf $TMP_ROOT' EXIT
 
 # Copy all kustomize files into a temp dir
 TMP_CONFIG="${TMP_ROOT}/config"
+TMP_KUSTOMIZE="${TMP_ROOT}/openshift/kustomize"
 cp -a "${REPO_ROOT}/config" "$TMP_CONFIG"
+mkdir -p "${TMP_ROOT}/openshift"
+cp -a "${REPO_ROOT}/openshift/kustomize" "${TMP_KUSTOMIZE}"
 
 # Override namespace to openshift-catalogd
-$YQ -i ".namespace = \"${NAMESPACE}\"" "${TMP_CONFIG}/base/default/kustomization.yaml"
+$YQ -i ".0.value = \"${NAMESPACE}\"" "${TMP_CONFIG}/base/manager/webhook/patch.yaml"
 
 # Create a temp dir for manifests
 TMP_MANIFEST_DIR="${TMP_ROOT}/manifests"
@@ -59,7 +62,7 @@ mkdir -p "$TMP_MANIFEST_DIR"
 
 # Run kustomize, which emits a single yaml file
 TMP_KUSTOMIZE_OUTPUT="${TMP_MANIFEST_DIR}/temp.yaml"
-$KUSTOMIZE build "${REPO_ROOT}"/openshift/kustomize/overlays/openshift -o "$TMP_KUSTOMIZE_OUTPUT"
+$KUSTOMIZE build "${TMP_KUSTOMIZE}/overlays/openshift" -o "$TMP_KUSTOMIZE_OUTPUT"
 
 for container_name in "${!IMAGE_MAPPINGS[@]}"; do
   placeholder="${IMAGE_MAPPINGS[$container_name]}"
