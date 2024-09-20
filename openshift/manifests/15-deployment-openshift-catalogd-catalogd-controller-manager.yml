@@ -8,6 +8,7 @@ metadata:
   name: catalogd-controller-manager
   namespace: openshift-catalogd
 spec:
+  minReadySeconds: 5
   replicas: 1
   selector:
     matchLabels:

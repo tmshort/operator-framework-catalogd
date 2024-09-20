@@ -1,6 +1,7 @@
 package source_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -19,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/operator-framework/catalogd/api/core/v1alpha1"
 	catalogderrors "github.com/operator-framework/catalogd/internal/errors"
@@ -161,6 +165,13 @@ func TestImageRegistry(t *testing.T) {
 						},
 					},
 				},
+				Status: v1alpha1.ClusterCatalogStatus{
+					ResolvedSource: &v1alpha1.ResolvedCatalogSource{
+						Image: &v1alpha1.ResolvedImageSource{
+							LastUnpacked: metav1.Time{Time: time.Date(2000, 2, 1, 12, 30, 0, 0, time.UTC)},
+						},
+					},
+				},
 			},
 			wantErr: false,
 			image: func() v1.Image {
@@ -187,6 +198,13 @@ func TestImageRegistry(t *testing.T) {
 						},
 					},
 				},
+				Status: v1alpha1.ClusterCatalogStatus{
+					ResolvedSource: &v1alpha1.ResolvedCatalogSource{
+						Image: &v1alpha1.ResolvedImageSource{
+							LastUnpacked: metav1.Time{Time: time.Date(2000, 2, 1, 12, 30, 0, 1, time.UTC)},
+						},
+					},
+				},
 			},
 			wantErr:             false,
 			digestAlreadyExists: true,
@@ -210,6 +228,13 @@ func TestImageRegistry(t *testing.T) {
 						Type: v1alpha1.SourceTypeImage,
 						Image: &v1alpha1.ImageSource{
 							Ref: "",
+						},
+					},
+				},
+				Status: v1alpha1.ClusterCatalogStatus{
+					ResolvedSource: &v1alpha1.ResolvedCatalogSource{
+						Image: &v1alpha1.ResolvedImageSource{
+							LastUnpacked: metav1.Time{Time: time.Date(2000, 2, 1, 12, 30, 0, 2, time.UTC)},
 						},
 					},
 				},
@@ -299,40 +324,6 @@ func TestImageRegistry(t *testing.T) {
 				return img
 			}(),
 		},
-		{
-			name: "digest ref, insecure specified, happy path",
-			catalog: &v1alpha1.ClusterCatalog{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test",
-				},
-				Spec: v1alpha1.ClusterCatalogSpec{
-					Source: v1alpha1.CatalogSource{
-						Type: v1alpha1.SourceTypeImage,
-						Image: &v1alpha1.ImageSource{
-							Ref:                   "",
-							InsecureSkipTLSVerify: true,
-						},
-					},
-				},
-			},
-			wantErr: false,
-			refType: "digest",
-			image: func() v1.Image {
-				img, err := random.Image(20, 3)
-				if err != nil {
-					panic(err)
-				}
-				img, err = mutate.Config(img, v1.Config{
-					Labels: map[string]string{
-						source.ConfigDirLabel: "/configs",
-					},
-				})
-				if err != nil {
-					panic(err)
-				}
-				return img
-			}(),
-		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create context, temporary cache directory,
@@ -343,6 +334,16 @@ func TestImageRegistry(t *testing.T) {
 			imgReg := &source.ImageRegistry{
 				BaseCachePath: testCache,
 			}
+
+			// Create a logger with a simple function-based LogSink that writes to the buffer
+			var buf bytes.Buffer
+			logger := funcr.New(func(prefix, args string) {
+				buf.WriteString(fmt.Sprintf("%s %s\n", prefix, args))
+			}, funcr.Options{Verbosity: 1})
+
+			// Add the logger into the context which will later be used
+			// in the Unpack function to get the logger
+			ctx = log.IntoContext(ctx, logger)
 
 			// Start a new server running an image registry
 			srv := httptest.NewServer(registry.New())
@@ -399,6 +400,18 @@ func TestImageRegistry(t *testing.T) {
 				entries, err := os.ReadDir(filepath.Join(testCache, tt.catalog.Name))
 				require.NoError(t, err)
 				assert.Len(t, entries, 1)
+				// If the digest should already exist check that we actually hit it
+				if tt.digestAlreadyExists {
+					assert.Contains(t, buf.String(), "found image in filesystem cache")
+					assert.Equal(t, tt.catalog.Status.ResolvedSource.Image.LastUnpacked, rs.ResolvedSource.Image.LastUnpacked)
+				} else if tt.oldDigestExists {
+					assert.NotContains(t, buf.String(), "found image in filesystem cache")
+					assert.NotEqual(t, tt.catalog.Status.ResolvedSource.Image.LastUnpacked, rs.ResolvedSource.Image.LastUnpacked)
+				} else {
+					require.NotNil(t, rs.ResolvedSource.Image.LastUnpacked)
+					require.NotNil(t, rs.ResolvedSource.Image)
+					assert.False(t, rs.ResolvedSource.Image.LastUnpacked.IsZero())
+				}
 			} else {
 				assert.Error(t, err)
 				var unrecov *catalogderrors.Unrecoverable
