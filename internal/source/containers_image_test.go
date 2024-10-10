@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/containers/image/v5/types"
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -313,9 +314,11 @@ func TestImageRegistry(t *testing.T) {
 			testCache := t.TempDir()
 			imgReg := &source.ContainersImageRegistry{
 				BaseCachePath: testCache,
-				SourceContext: &types.SystemContext{
-					OCIInsecureSkipTLSVerify:    true,
-					DockerInsecureSkipTLSVerify: types.OptionalBoolTrue,
+				SourceContextFunc: func(logger logr.Logger) (*types.SystemContext, error) {
+					return &types.SystemContext{
+						OCIInsecureSkipTLSVerify:    true,
+						DockerInsecureSkipTLSVerify: types.OptionalBoolTrue,
+					}, nil
 				},
 			}
 
@@ -396,7 +399,7 @@ func TestImageRegistry(t *testing.T) {
 				// If the digest should already exist check that we actually hit it
 				if tt.digestAlreadyExists {
 					assert.Contains(t, buf.String(), "image already unpacked")
-					assert.Equal(t, rs.UnpackTime, unpackDirStat.ModTime())
+					assert.Equal(t, rs.UnpackTime, unpackDirStat.ModTime().Truncate(time.Second))
 				} else if tt.oldDigestExists {
 					assert.NotContains(t, buf.String(), "image already unpacked")
 					assert.NotEqual(t, rs.UnpackTime, oldDigestModTime)
@@ -431,6 +434,9 @@ func TestImageRegistryMissingLabelConsistentFailure(t *testing.T) {
 	testCache := t.TempDir()
 	imgReg := &source.ContainersImageRegistry{
 		BaseCachePath: testCache,
+		SourceContextFunc: func(logger logr.Logger) (*types.SystemContext, error) {
+			return &types.SystemContext{}, nil
+		},
 	}
 
 	// Start a new server running an image registry

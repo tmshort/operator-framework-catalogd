@@ -34,8 +34,8 @@ import (
 const ConfigDirLabel = "operators.operatorframework.io.index.configs.v1"
 
 type ContainersImageRegistry struct {
-	BaseCachePath string
-	SourceContext *types.SystemContext
+	BaseCachePath     string
+	SourceContextFunc func(logger logr.Logger) (*types.SystemContext, error)
 }
 
 func (i *ContainersImageRegistry) Unpack(ctx context.Context, catalog *catalogdv1alpha1.ClusterCatalog) (*Result, error) {
@@ -49,12 +49,16 @@ func (i *ContainersImageRegistry) Unpack(ctx context.Context, catalog *catalogdv
 		return nil, reconcile.TerminalError(fmt.Errorf("error parsing catalog, catalog %s has a nil image source", catalog.Name))
 	}
 
+	srcCtx, err := i.SourceContextFunc(l)
+	if err != nil {
+		return nil, err
+	}
 	//////////////////////////////////////////////////////
 	//
 	// Resolve a canonical reference for the image.
 	//
 	//////////////////////////////////////////////////////
-	imgRef, canonicalRef, specIsCanonical, err := resolveReferences(ctx, catalog.Spec.Source.Image.Ref, i.SourceContext)
+	imgRef, canonicalRef, specIsCanonical, err := resolveReferences(ctx, catalog.Spec.Source.Image.Ref, srcCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +114,7 @@ func (i *ContainersImageRegistry) Unpack(ctx context.Context, catalog *catalogdv
 	// a policy context for the image pull.
 	//
 	//////////////////////////////////////////////////////
-	policyContext, err := loadPolicyContext(i.SourceContext, l)
+	policyContext, err := loadPolicyContext(srcCtx, l)
 	if err != nil {
 		return nil, fmt.Errorf("error loading policy context: %w", err)
 	}
@@ -126,7 +130,7 @@ func (i *ContainersImageRegistry) Unpack(ctx context.Context, catalog *catalogdv
 	//
 	//////////////////////////////////////////////////////
 	if _, err := copy.Image(ctx, policyContext, layoutRef, dockerRef, &copy.Options{
-		SourceCtx: i.SourceContext,
+		SourceCtx: srcCtx,
 	}); err != nil {
 		return nil, fmt.Errorf("error copying image: %w", err)
 	}
@@ -137,7 +141,7 @@ func (i *ContainersImageRegistry) Unpack(ctx context.Context, catalog *catalogdv
 	// Mount the image we just pulled
 	//
 	//////////////////////////////////////////////////////
-	if err := i.unpackImage(ctx, unpackPath, layoutRef, specIsCanonical); err != nil {
+	if err := i.unpackImage(ctx, unpackPath, layoutRef, specIsCanonical, srcCtx); err != nil {
 		if cleanupErr := deleteRecursive(unpackPath); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
@@ -162,13 +166,23 @@ func successResult(unpackPath string, canonicalRef reference.Canonical, lastUnpa
 		ResolvedSource: &catalogdv1alpha1.ResolvedCatalogSource{
 			Type: catalogdv1alpha1.SourceTypeImage,
 			Image: &catalogdv1alpha1.ResolvedImageSource{
-				Ref:                       canonicalRef.String(),
-				LastSuccessfulPollAttempt: metav1.NewTime(time.Now()),
+				Ref: canonicalRef.String(),
+
+				// We truncate to the second because metav1.Time is serialized
+				// as RFC 3339 which only has second-level precision. When we
+				// use this result in a comparison with what we deserialized
+				// from the Kubernetes API server, we need it to match.
+				LastSuccessfulPollAttempt: metav1.NewTime(time.Now().Truncate(time.Second)),
 			},
 		},
-		State:      StateUnpacked,
-		Message:    fmt.Sprintf("unpacked %q successfully", canonicalRef),
-		UnpackTime: lastUnpacked,
+		State:   StateUnpacked,
+		Message: fmt.Sprintf("unpacked %q successfully", canonicalRef),
+
+		// We truncate to the second because metav1.Time is serialized
+		// as RFC 3339 which only has second-level precision. When we
+		// use this result in a comparison with what we deserialized
+		// from the Kubernetes API server, we need it to match.
+		UnpackTime: lastUnpacked.Truncate(time.Second),
 	}
 }
 
@@ -243,8 +257,8 @@ func loadPolicyContext(sourceContext *types.SystemContext, l logr.Logger) (*sign
 	return signature.NewPolicyContext(policy)
 }
 
-func (i *ContainersImageRegistry) unpackImage(ctx context.Context, unpackPath string, imageReference types.ImageReference, specIsCanonical bool) error {
-	img, err := imageReference.NewImage(ctx, i.SourceContext)
+func (i *ContainersImageRegistry) unpackImage(ctx context.Context, unpackPath string, imageReference types.ImageReference, specIsCanonical bool, sourceContext *types.SystemContext) error {
+	img, err := imageReference.NewImage(ctx, sourceContext)
 	if err != nil {
 		return fmt.Errorf("error reading image: %w", err)
 	}
@@ -254,7 +268,7 @@ func (i *ContainersImageRegistry) unpackImage(ctx context.Context, unpackPath st
 		}
 	}()
 
-	layoutSrc, err := imageReference.NewImageSource(ctx, i.SourceContext)
+	layoutSrc, err := imageReference.NewImageSource(ctx, sourceContext)
 	if err != nil {
 		return fmt.Errorf("error creating image source: %w", err)
 	}
