@@ -111,9 +111,23 @@ spec:
             - mountPath: /etc/containers
               name: etc-containers
               readOnly: true
+            - mountPath: /hostetc
+              name: etc-host
+              readOnly: true
             - mountPath: /etc/docker
               name: etc-docker
-              readOnly: true
+      initContainers:
+        - args:
+            - -c
+            - ln -s /hostetc/docker/certs.d /etc/docker/certs.d
+          command:
+            - /bin/bash
+          image: ${CATALOGD_IMAGE}
+          imagePullPolicy: IfNotPresent
+          name: init-etc-docker
+          volumeMounts:
+            - mountPath: /etc/docker
+              name: etc-docker
       nodeSelector:
         kubernetes.io/os: linux
         node-role.kubernetes.io/master: ""
@@ -167,7 +181,9 @@ spec:
             type: Directory
           name: etc-containers
         - hostPath:
-            path: /etc/docker
+            path: /etc
             type: Directory
+          name: etc-host
+        - emptyDir: {}
           name: etc-docker
       priorityClassName: system-cluster-critical
